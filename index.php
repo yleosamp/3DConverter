@@ -4,6 +4,11 @@ require_once 'converter.php';
 $message = '';
 $messageType = '';
 
+$formatosSuportados = [
+    'glb' => ['nome' => 'GL Transmission Binary', 'ext' => '.glb'],
+    'fbx' => ['nome' => 'Autodesk FBX', 'ext' => '.fbx']
+];
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_FILES['model'])) {
         $file = $_FILES['model'];
@@ -60,7 +65,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     </script>
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+
+    <link rel="icon" type="image/png" href="./favicon-96x96.png" sizes="96x96" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="shortcut icon" href="./favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
+    <link rel="manifest" href="./site.webmanifest" />
 </head>
+
 <body class="bg-dark-900 min-h-screen transition-colors duration-200">
     <div class="container mx-auto px-4 py-8 max-w-3xl">
         <!-- Header -->
@@ -85,11 +97,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <!-- Upload Form -->
         <div class="bg-dark-800 rounded-xl shadow-lg p-8 border border-dark-700">
             <form method="POST" enctype="multipart/form-data" class="space-y-6">
+                <!-- Seleção de Formato -->
+                <div class="mb-6">
+                    <select name="format" id="formatSelect" 
+                            class="bg-dark-700 text-gray-300 rounded-lg px-4 py-2 w-full
+                                   border border-dark-600 focus:border-primary focus:ring-1 focus:ring-primary
+                                   disabled:opacity-50 disabled:cursor-not-allowed">
+                        <option value="">Detectar formato automaticamente</option>
+                        <?php foreach ($formatosSuportados as $ext => $info): ?>
+                            <option value="<?php echo $ext; ?>">
+                                <?php echo $info['nome'] . ' (' . $info['ext'] . ')'; ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+
                 <!-- Drop Zone -->
                 <div id="dropZone" class="border-2 border-dashed border-dark-600 rounded-lg p-8 text-center transition-all duration-200">
                     <input type="file" 
                            name="model" 
-                           accept=".glb" 
+                           accept="<?php echo '.'.implode(',.', array_keys($formatosSuportados)); ?>"
                            required
                            class="hidden" 
                            id="fileInput">
@@ -176,11 +203,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     </div>
 
     <script>
-        const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
+        const dropZone = document.getElementById('dropZone');
         const fileName = document.getElementById('fileName');
         const uploadText = document.getElementById('uploadText');
         const uploadIcon = document.getElementById('uploadIcon');
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                const file = e.target.files[0];
+                updateFileName(file);
+            }
+        });
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('border-primary', 'bg-primary/5');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('border-primary', 'bg-primary/5');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            const file = e.dataTransfer.files[0];
+            fileInput.files = e.dataTransfer.files;
+            updateFileName(file);
+        });
 
         function updateFileName(file) {
             fileName.querySelector('span').textContent = file.name;
@@ -188,50 +238,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             uploadText.classList.add('hidden');
             uploadIcon.classList.add('text-primary');
             dropZone.classList.add('border-primary', 'bg-primary/5');
-        }
-
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length > 0) {
-                updateFileName(e.target.files[0]);
-            }
-        });
-
-        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
-            dropZone.addEventListener(eventName, preventDefaults, false);
-        });
-
-        function preventDefaults(e) {
-            e.preventDefault();
-            e.stopPropagation();
-        }
-
-        ['dragenter', 'dragover'].forEach(eventName => {
-            dropZone.addEventListener(eventName, highlight, false);
-        });
-
-        ['dragleave', 'drop'].forEach(eventName => {
-            dropZone.addEventListener(eventName, unhighlight, false);
-        });
-
-        function highlight(e) {
-            dropZone.classList.add('border-primary', 'bg-primary/5');
-        }
-
-        function unhighlight(e) {
-            if (!fileInput.files.length) {
-                dropZone.classList.remove('border-primary', 'bg-primary/5');
-            }
-        }
-
-        dropZone.addEventListener('drop', handleDrop, false);
-
-        function handleDrop(e) {
-            const dt = e.dataTransfer;
-            const files = dt.files;
-            fileInput.files = files;
-            if (files.length > 0) {
-                updateFileName(files[0]);
-            }
         }
     </script>
 </body>

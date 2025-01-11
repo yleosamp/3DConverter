@@ -1,14 +1,15 @@
 <?php
-require_once 'GlbParser.php';
+require_once __DIR__ . '/parsers/IModelParser.php';
+require_once __DIR__ . '/parsers/GlbParser.php';
+require_once __DIR__ . '/parsers/FbxParser.php';
+require_once __DIR__ . '/parsers/ColladaParser.php';
+require_once __DIR__ . '/parsers/StlParser.php';
+// ... outros parsers
 
 class ModelConverter {
     private $tempDir;
-    private $vertices = [];
-    private $normals = [];
-    private $uvs = [];
-    private $indices = [];
-    private $materials = [];
-    private $textures = [];
+    private $format;
+    private $parser;
     
     public function __construct() {
         $this->tempDir = __DIR__ . '/temp/' . uniqid();
@@ -19,314 +20,204 @@ class ModelConverter {
     }
     
     public function isValidFile($file) {
-        return pathinfo($file['name'], PATHINFO_EXTENSION) === 'glb';
+        $extension = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+        return in_array($extension, ['glb', 'fbx']);
     }
     
     public function convert($file) {
         try {
-            if (!move_uploaded_file($file['tmp_name'], $this->tempDir . '/model.glb')) {
+            $extension = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+            $this->format = $extension;
+            $tempFile = $this->tempDir . '/model.' . $extension;
+            
+            if (!move_uploaded_file($file['tmp_name'], $tempFile)) {
                 throw new Exception('Erro ao mover arquivo');
             }
             
-            $parser = new GlbParser($this->tempDir . '/model.glb');
-            $glb = $parser->parse();
+            $this->parser = $this->getParser($extension, $tempFile);
+            $model = $this->parser->parse();
             
-            if (!isset($glb['json']['meshes'])) {
-                throw new Exception('Arquivo GLB não contém meshes');
-            }
+            // Debug
+            error_log('Modelo parseado: ' . print_r($model, true));
             
-            $this->processGLTF($glb);
-            $this->extractTextures($glb);
-            
-            $objContent = $this->generateOBJ();
-            $mtlContent = $this->generateMTL();
-            
-            file_put_contents($this->tempDir . '/model.obj', $objContent);
-            file_put_contents($this->tempDir . '/model.mtl', $mtlContent);
-            
+            $this->generateFiles($model);
             return $this->createZipArchive();
+            
         } catch (Exception $e) {
-            error_log($e->getMessage());
+            error_log('Erro na conversão: ' . $e->getMessage());
+            error_log('Stack trace: ' . $e->getTraceAsString());
             return false;
         }
     }
     
-    private function processGLTF($glb) {
-        $json = $glb['json'];
-        
-        foreach ($json['meshes'] as $mesh) {
-            foreach ($mesh['primitives'] as $primitive) {
-                if (isset($primitive['attributes']['POSITION'])) {
-                    $this->vertices = $this->extractAttribute($primitive['attributes']['POSITION'], $glb);
+    private function getParser($extension, $filePath) {
+        switch ($extension) {
+            case 'glb':
+                return new GlbParser($filePath);
+            case 'fbx':
+                return new FbxParser($filePath);
+            default:
+                throw new Exception('Formato não suportado. Use GLB ou FBX.');
+        }
+    }
+    
+    private function generateFiles($model) {
+        // Gera arquivo OBJ
+        $objContent = $this->generateObjContent($model);
+        file_put_contents($this->tempDir . '/model.obj', $objContent);
+
+        // Gera arquivo MTL
+        if (!empty($model['materials'])) {
+            $mtlContent = $this->generateMtlContent($model);
+            file_put_contents($this->tempDir . '/model.mtl', $mtlContent);
+        }
+
+        // Processa texturas
+        foreach ($model['materials'] as $index => $material) {
+            if (isset($material['pbrMetallicRoughness'])) {
+                $pbr = $material['pbrMetallicRoughness'];
+                
+                // Textura base
+                if (isset($pbr['baseColorTexture'])) {
+                    $this->saveTexture($model, $pbr['baseColorTexture'], 'baseColor_' . $index);
                 }
-                if (isset($primitive['attributes']['NORMAL'])) {
-                    $this->normals = $this->extractAttribute($primitive['attributes']['NORMAL'], $glb);
+                
+                // Textura metálica/rugosidade
+                if (isset($pbr['metallicRoughnessTexture'])) {
+                    $this->saveTexture($model, $pbr['metallicRoughnessTexture'], 'metallic_' . $index);
                 }
-                if (isset($primitive['attributes']['TEXCOORD_0'])) {
-                    $this->uvs = $this->extractAttribute($primitive['attributes']['TEXCOORD_0'], $glb);
-                }
-                if (isset($primitive['indices'])) {
-                    $this->indices = $this->extractIndices($primitive['indices'], $glb);
-                }
+            }
+            
+            // Normal map
+            if (isset($material['normalTexture'])) {
+                $this->saveTexture($model, $material['normalTexture'], 'normal_' . $index);
             }
         }
     }
-    
-    private function extractAttribute($accessorIndex, $glb) {
-        $json = $glb['json'];
-        $accessor = $json['accessors'][$accessorIndex];
-        $bufferView = $json['bufferViews'][$accessor['bufferView']];
-        $offset = isset($bufferView['byteOffset']) ? $bufferView['byteOffset'] : 0;
+
+    private function saveTexture($model, $textureInfo, $prefix) {
+        $textureIndex = $textureInfo['index'];
+        $texture = $model['textures'][$textureIndex];
         
-        $data = substr($glb['binary'], $offset, $bufferView['byteLength']);
-        $componentType = $accessor['componentType'];
-        $count = $accessor['count'];
-        
-        $format = 'V';  // default uint32
-        if ($componentType === 5126) $format = 'f';  // float32
-        else if ($componentType === 5123) $format = 'v';  // uint16
-        else if ($componentType === 5121) $format = 'C';  // uint8
-        
-        $values = [];
-        $size = $accessor['type'] === 'VEC3' ? 3 : 2;
-        
-        for ($i = 0; $i < $count; $i++) {
-            $offset = $i * $size * 4;
-            $components = unpack($format . $size, substr($data, $offset, $size * 4));
-            $values[] = array_values($components);
+        if (isset($texture['data'])) {
+            $extension = $this->getTextureExtension($texture['mimeType']);
+            file_put_contents(
+                $this->tempDir . '/textures/' . $prefix . $extension,
+                $texture['data']
+            );
         }
-        
-        return $values;
     }
-    
-    private function extractIndices($accessorIndex, $glb) {
-        $json = $glb['json'];
-        $accessor = $json['accessors'][$accessorIndex];
-        $bufferView = $json['bufferViews'][$accessor['bufferView']];
-        $offset = isset($bufferView['byteOffset']) ? $bufferView['byteOffset'] : 0;
-        
-        $data = substr($glb['binary'], $offset, $bufferView['byteLength']);
-        $count = $accessor['count'];
-        
-        $format = $accessor['componentType'] === 5123 ? 'v' : 'V';
-        $indices = [];
-        
-        for ($i = 0; $i < $count; $i++) {
-            $offset = $i * ($format === 'v' ? 2 : 4);
-            $index = unpack($format, substr($data, $offset, $format === 'v' ? 2 : 4))[1];
-            $indices[] = $index;
+
+    private function generateObjContent($model) {
+        $content = "# Convertido por 3D Converter\n";
+        $content .= "mtllib model.mtl\n\n";
+
+        // Vértices
+        foreach ($model['vertices'] as $v) {
+            $content .= sprintf("v %.6f %.6f %.6f\n", $v[0], $v[1], $v[2]);
         }
-        
-        return $indices;
+
+        // Normais
+        foreach ($model['normals'] as $n) {
+            $content .= sprintf("vn %.6f %.6f %.6f\n", $n[0], $n[1], $n[2]);
+        }
+
+        // UVs
+        foreach ($model['uvs'] as $uv) {
+            $content .= sprintf("vt %.6f %.6f\n", $uv[0], $uv[1]);
+        }
+
+        // Faces
+        $content .= "\n# Faces\n";
+        $vertexCount = count($model['vertices']);
+        for ($i = 0; $i < $vertexCount; $i += 3) {
+            $v1 = $i + 1;
+            $v2 = $i + 2;
+            $v3 = $i + 3;
+            $content .= sprintf("f %d/%d/%d %d/%d/%d %d/%d/%d\n",
+                $v1, $v1, $v1,
+                $v2, $v2, $v2,
+                $v3, $v3, $v3
+            );
+        }
+
+        return $content;
     }
-    
-    private function extractTextures($glb) {
-        $json = $glb['json'];
-        
-        if (!isset($json['images']) || !isset($json['materials'])) {
-            return;
-        }
-        
-        foreach ($json['materials'] as $index => $material) {
-            $materialData = [
-                'name' => "material_{$index}",
-                'metallic' => 0.0,
-                'roughness' => 1.0
-            ];
+
+    private function generateMtlContent($model) {
+        $content = "# Material file generated by 3D Converter\n\n";
+
+        foreach ($model['materials'] as $index => $material) {
+            $content .= "newmtl " . $material['name'] . "\n";
             
             if (isset($material['pbrMetallicRoughness'])) {
                 $pbr = $material['pbrMetallicRoughness'];
                 
-                // Base Color Texture
+                // Cor base
+                if (isset($pbr['baseColorFactor'])) {
+                    $content .= sprintf("Kd %.6f %.6f %.6f\n",
+                        $pbr['baseColorFactor'][0],
+                        $pbr['baseColorFactor'][1],
+                        $pbr['baseColorFactor'][2]
+                    );
+                }
+
+                // Textura base
                 if (isset($pbr['baseColorTexture'])) {
-                    $texturePath = $this->extractTextureFromGLB(
-                        $glb,
-                        $pbr['baseColorTexture']['index'],
-                        "diffuse_{$index}"
-                    );
-                    $materialData['diffuseMap'] = $texturePath;
-                }
-                
-                // Metallic Roughness Texture
-                if (isset($pbr['metallicRoughnessTexture'])) {
-                    $texturePath = $this->extractTextureFromGLB(
-                        $glb,
-                        $pbr['metallicRoughnessTexture']['index'],
-                        "metallic_{$index}"
-                    );
-                    $materialData['metallicMap'] = $texturePath;
-                }
-                
-                // Valores fixos de metallic/roughness
-                if (isset($pbr['metallicFactor'])) {
-                    $materialData['metallic'] = $pbr['metallicFactor'];
-                }
-                if (isset($pbr['roughnessFactor'])) {
-                    $materialData['roughness'] = $pbr['roughnessFactor'];
+                    $content .= "map_Kd textures/texture_" . $pbr['baseColorTexture']['index'] . ".png\n";
                 }
             }
-            
-            // Normal Map
+
+            // Normal map
             if (isset($material['normalTexture'])) {
-                $texturePath = $this->extractTextureFromGLB(
-                    $glb,
-                    $material['normalTexture']['index'],
-                    "normal_{$index}"
-                );
-                $materialData['normalMap'] = $texturePath;
+                $content .= "map_Bump textures/texture_" . $material['normalTexture']['index'] . ".png\n";
             }
-            
-            $this->materials[$index] = $materialData;
+
+            $content .= "\n";
+        }
+
+        return $content;
+    }
+
+    private function getTextureExtension($mimeType) {
+        switch ($mimeType) {
+            case 'image/jpeg':
+                return '.jpg';
+            case 'image/png':
+                return '.png';
+            default:
+                return '.png';
         }
     }
-    
-    private function extractTextureFromGLB($glb, $textureIndex, $prefix) {
-        $json = $glb['json'];
-        $imageIndex = $json['textures'][$textureIndex]['source'];
-        $image = $json['images'][$imageIndex];
-        
-        if (isset($image['bufferView'])) {
-            $bufferView = $json['bufferViews'][$image['bufferView']];
-            $offset = isset($bufferView['byteOffset']) ? $bufferView['byteOffset'] : 0;
-            $length = $bufferView['byteLength'];
-            
-            $imageData = substr($glb['binary'], $offset, $length);
-            $mimeType = $image['mimeType'];
-            $extension = $this->getMimeExtension($mimeType);
-            
-            $texturePath = "{$prefix}.{$extension}";
-            file_put_contents($this->tempDir . '/textures/' . $texturePath, $imageData);
-            
-            return $texturePath;
-        }
-        return null;
-    }
-    
-    private function getMimeExtension($mimeType) {
-        $types = [
-            'image/jpeg' => 'jpg',
-            'image/png' => 'png',
-            'image/webp' => 'webp'
-        ];
-        return $types[$mimeType] ?? 'png';
-    }
-    
-    private function generateOBJ() {
-        $obj = "# Converted from GLB\n";
-        $obj .= "mtllib model.mtl\n\n";
-        
-        // Vertices
-        foreach ($this->vertices as $v) {
-            $obj .= sprintf("v %.6f %.6f %.6f\n", $v[0], $v[1], $v[2]);
-        }
-        
-        // Texturas UV
-        foreach ($this->uvs as $uv) {
-            $obj .= sprintf("vt %.6f %.6f\n", $uv[0], 1 - $uv[1]); // Inverte Y para compatibilidade
-        }
-        
-        // Normais
-        foreach ($this->normals as $n) {
-            $obj .= sprintf("vn %.6f %.6f %.6f\n", $n[0], $n[1], $n[2]);
-        }
-        
-        // Faces com material
-        if (!empty($this->materials)) {
-            foreach ($this->materials as $matIndex => $material) {
-                $obj .= "\nusemtl " . $material['name'] . "\n";
-                
-                // Gera faces para este material
-                for ($i = 0; $i < count($this->indices); $i += 3) {
-                    $v1 = $this->indices[$i] + 1;
-                    $v2 = $this->indices[$i+1] + 1;
-                    $v3 = $this->indices[$i+2] + 1;
-                    
-                    $obj .= sprintf("f %d/%d/%d %d/%d/%d %d/%d/%d\n",
-                        $v1, $v1, $v1,
-                        $v2, $v2, $v2,
-                        $v3, $v3, $v3
-                    );
-                }
-            }
-        } else {
-            // Se não houver materiais, gera faces sem material
-            for ($i = 0; $i < count($this->indices); $i += 3) {
-                $v1 = $this->indices[$i] + 1;
-                $v2 = $this->indices[$i+1] + 1;
-                $v3 = $this->indices[$i+2] + 1;
-                
-                $obj .= sprintf("f %d/%d/%d %d/%d/%d %d/%d/%d\n",
-                    $v1, $v1, $v1,
-                    $v2, $v2, $v2,
-                    $v3, $v3, $v3
-                );
-            }
-        }
-        
-        return $obj;
-    }
-    
-    private function generateMTL() {
-        $mtl = "# Material file for model.obj\n\n";
-        
-        foreach ($this->materials as $index => $material) {
-            $mtl .= "newmtl " . $material['name'] . "\n";
-            $mtl .= "Ka 1.000000 1.000000 1.000000\n";
-            $mtl .= "Kd 1.000000 1.000000 1.000000\n";
-            $mtl .= "Ks 0.000000 0.000000 0.000000\n";
-            
-            // Metallic e Roughness
-            $mtl .= sprintf("Pm %.6f\n", $material['metallic']); // Metallic
-            $mtl .= sprintf("Pr %.6f\n", $material['roughness']); // Roughness
-            
-            // Mapas de textura
-            if (isset($material['diffuseMap'])) {
-                $mtl .= "map_Kd textures/" . $material['diffuseMap'] . "\n";
-            }
-            if (isset($material['metallicMap'])) {
-                $mtl .= "map_Pm textures/" . $material['metallicMap'] . "\n";
-            }
-            if (isset($material['normalMap'])) {
-                $mtl .= "map_bump textures/" . $material['normalMap'] . "\n";
-                $mtl .= "norm textures/" . $material['normalMap'] . "\n";
-            }
-            
-            $mtl .= "\n";
-        }
-        
-        return $mtl;
-    }
-    
+
     private function createZipArchive() {
         $zipPath = $this->tempDir . '/converted_model.zip';
         $zip = new ZipArchive();
         
-        if ($zip->open($zipPath, ZipArchive::CREATE) !== TRUE) {
-            throw new Exception('Não foi possível criar o arquivo ZIP');
+        if ($zip->open($zipPath, ZipArchive::CREATE) !== true) {
+            throw new Exception('Não foi possível criar arquivo ZIP');
         }
-        
-        // Adiciona OBJ e MTL
-        $zip->addFile($this->tempDir . '/model.obj', 'model.obj');
-        $zip->addFile($this->tempDir . '/model.mtl', 'model.mtl');
-        
-        // Adiciona texturas
-        $textures = glob($this->tempDir . '/textures/*');
-        foreach ($textures as $texture) {
-            $zip->addFile($texture, 'textures/' . basename($texture));
-        }
-        
+
+        $this->addDirToZip($zip, $this->tempDir, '');
         $zip->close();
+
         return $zipPath;
     }
-    
-    public function __destruct() {
-        if (file_exists($this->tempDir)) {
-            $files = glob($this->tempDir . '/{,*/}*', GLOB_BRACE);
-            foreach ($files as $file) {
-                if (is_file($file)) unlink($file);
+
+    private function addDirToZip($zip, $path, $relativePath) {
+        $files = scandir($path);
+        foreach ($files as $file) {
+            if ($file === '.' || $file === '..' || pathinfo($file, PATHINFO_EXTENSION) === 'glb') continue;
+            
+            $filePath = $path . '/' . $file;
+            $zipPath = $relativePath . ($relativePath ? '/' : '') . $file;
+
+            if (is_dir($filePath)) {
+                $zip->addEmptyDir($zipPath);
+                $this->addDirToZip($zip, $filePath, $zipPath);
+            } else {
+                $zip->addFile($filePath, $zipPath);
             }
-            rmdir($this->tempDir . '/textures');
-            rmdir($this->tempDir);
         }
     }
 } 
