@@ -12,11 +12,27 @@ class ModelConverter {
     private $parser;
     
     public function __construct() {
-        $this->tempDir = __DIR__ . '/temp/' . uniqid();
-        if (!file_exists($this->tempDir)) {
-            mkdir($this->tempDir, 0777, true);
+        $this->tempDir = __DIR__ . '/uploads/3dconverter_' . uniqid();
+        
+        // Cria diretório uploads se não existir
+        if (!file_exists(__DIR__ . '/uploads')) {
+            if (!mkdir(__DIR__ . '/uploads', 0777, true)) {
+                error_log("Erro ao criar diretório uploads");
+            }
         }
-        mkdir($this->tempDir . '/textures');
+        
+        // Cria diretório temporário
+        if (!mkdir($this->tempDir, 0777, true)) {
+            error_log("Erro ao criar diretório temporário");
+        }
+        
+        // Cria diretório de texturas
+        if (!mkdir($this->tempDir . '/textures', 0777, true)) {
+            error_log("Erro ao criar diretório de texturas");
+        }
+        
+        // Debug
+        error_log("Diretório temporário criado: " . $this->tempDir);
     }
     
     public function isValidFile($file) {
@@ -30,8 +46,24 @@ class ModelConverter {
             $this->format = $extension;
             $tempFile = $this->tempDir . '/model.' . $extension;
             
-            if (!move_uploaded_file($file['tmp_name'], $tempFile)) {
-                throw new Exception('Erro ao mover arquivo');
+            // Debug - informações do arquivo
+            error_log('Arquivo temporário original: ' . $file['tmp_name']);
+            error_log('Destino do arquivo: ' . $tempFile);
+            error_log('Permissões do diretório: ' . substr(sprintf('%o', fileperms($this->tempDir)), -4));
+            
+            // Verifica se o arquivo foi realmente enviado
+            if (!is_uploaded_file($file['tmp_name'])) {
+                // Se não foi um upload via POST, tenta copiar diretamente
+                if (!copy($file['tmp_name'], $tempFile)) {
+                    error_log('Falha ao copiar arquivo: ' . error_get_last()['message']);
+                    throw new Exception('Erro ao copiar arquivo');
+                }
+            } else {
+                // Se foi um upload via POST, usa move_uploaded_file
+                if (!move_uploaded_file($file['tmp_name'], $tempFile)) {
+                    error_log('Falha ao mover arquivo: ' . error_get_last()['message']);
+                    throw new Exception('Erro ao mover arquivo');
+                }
             }
             
             $this->parser = $this->getParser($extension, $tempFile);

@@ -1,4 +1,13 @@
 <?php
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+// Verificar permissões
+$uploadDir = __DIR__ . '/uploads';
+if (!is_writable($uploadDir)) {
+    die('Diretório de uploads sem permissão de escrita: ' . $uploadDir);
+}
+
 require_once 'converter.php';
 
 $message = '';
@@ -11,6 +20,41 @@ $formatosSuportados = [
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_FILES['model'])) {
+        // Debug do upload
+        error_log('Upload recebido:');
+        error_log('Nome do arquivo: ' . $_FILES['model']['name']);
+        error_log('Arquivo temporário: ' . $_FILES['model']['tmp_name']);
+        error_log('Erro de upload: ' . $_FILES['model']['error']);
+        
+        // Verifica se houve erro no upload
+        if ($_FILES['model']['error'] !== UPLOAD_ERR_OK) {
+            $message = "Erro no upload do arquivo: ";
+            switch ($_FILES['model']['error']) {
+                case UPLOAD_ERR_INI_SIZE:
+                    $message .= "O arquivo excede o tamanho máximo permitido pelo PHP.";
+                    break;
+                case UPLOAD_ERR_FORM_SIZE:
+                    $message .= "O arquivo excede o tamanho máximo permitido pelo formulário.";
+                    break;
+                case UPLOAD_ERR_PARTIAL:
+                    $message .= "O upload foi interrompido.";
+                    break;
+                case UPLOAD_ERR_NO_FILE:
+                    $message .= "Nenhum arquivo foi enviado.";
+                    break;
+                case UPLOAD_ERR_NO_TMP_DIR:
+                    $message .= "Diretório temporário não encontrado.";
+                    break;
+                case UPLOAD_ERR_CANT_WRITE:
+                    $message .= "Falha ao escrever o arquivo.";
+                    break;
+                default:
+                    $message .= "Erro desconhecido.";
+            }
+            error_log($message);
+            die($message);
+        }
+
         $file = $_FILES['model'];
         $converter = new ModelConverter();
         
